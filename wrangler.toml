@@ -1,0 +1,3 @@
+name = "search-api-worker"
+main = "index.js"           # <- seu arquivo com o Worker
+compatibility_date = "2025-08-30"
