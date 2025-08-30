@@ -1,68 +1,82 @@
-// index.js (Node 18+)
-import data from "./data.js";
+export default {
+  async fetch(request) {
+    try {
+      const API_KEY = "Gus"; // chave esperada no header x-api-key
 
-function decodeDuckDuckGoLink(url) {
-  // DuckDuckGo sometimes returns links like //duckduckgo.com/l/?uddg=ENCODED_URL
-  try {
-    const m = url.match(/[?&]uddg=([^&]+)/);
-    if (m) return decodeURIComponent(m[1]);
-    // sometimes link starts with '//' (protocol relative) — normalize to https
-    if (url.startsWith("//")) return "https:" + url;
-    return url;
-  } catch {
-    return url;
-  }
-}
+      const url = new URL(request.url);
+      const q = (url.searchParams.get("q") || "").trim();
+      const limit = Math.min(20, Math.max(1, Number(url.searchParams.get("limit") || 5)));
 
-async function searchDuckDuckGo(query, limit = 5) {
-  if (!query) throw new Error("Query vazia");
+      const providedKey = request.headers.get("x-api-key") || "";
 
-  const url = new URL(data.endpoint);
-  url.searchParams.set("q", query);
-  url.searchParams.set("limit", String(limit));
+      if (!q) {
+        return new Response(JSON.stringify({ error: "Parâmetro 'q' (query) é obrigatório." }), {
+          status: 400,
+          headers: jsonHeaders(),
+        });
+      }
 
-  const res = await fetch(url.toString(), {
-    headers: { [data.auth.headerName]: data.auth.exampleKey }
-  });
+      if (providedKey !== API_KEY) {
+        return new Response(JSON.stringify({ error: "API Key inválida." }), {
+          status: 401,
+          headers: jsonHeaders(),
+        });
+      }
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Falha ao consultar API: ${res.status} ${res.statusText} ${text ? "- " + text : ""}`);
-  }
+      // Busca HTML do DuckDuckGo (endpoint HTML)
+      const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+      const resp = await fetch(ddgUrl, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible)" },
+        // note: Cloudflare Worker fetch tem timeout interno; DuckDuckGo costuma responder rápido
+      });
 
-  const json = await res.json();
+      if (!resp.ok) {
+        return new Response(JSON.stringify({ error: `DuckDuckGo retornou status ${resp.status}` }), {
+          status: 502,
+          headers: jsonHeaders(),
+        });
+      }
 
-  // Normalizar/decodificar links que sejam redirecionamentos do DuckDuckGo
-  if (Array.isArray(json.results)) {
-    json.results = json.results.map(r => {
-      const link = typeof r.link === "string" ? decodeDuckDuckGoLink(r.link) : r.link;
-      return { title: r.title ?? "", link };
-    });
-  }
+      const html = await resp.text();
 
-  return json;
-}
+      // Extrair resultados: procura por <a ... class="...result__a..." href="...">TITLE</a>
+      const results = [];
+      const regex = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      while ((match = regex.exec(html)) && results.length < limit) {
+        let link = match[1];
+        let title = match[2].replace(/<[^>]*>/g, "").trim();
 
-// Executa: node index.js termo [limit]
-(async () => {
-  try {
-    const argv = process.argv.slice(2);
-    const query = argv[0] ?? "python";
-    const limit = argv[1] ? Number(argv[1]) : 5;
+        // Decodificar links redirecionados do DuckDuckGo (uddg param)
+        const mUddg = link.match(/[?&]uddg=([^&]+)/);
+        if (mUddg) {
+          try { link = decodeURIComponent(mUddg[1]); } catch { /* keep original */ }
+        } else if (link.startsWith("//")) {
+          link = "https:" + link;
+        }
 
-    const dataResponse = await searchDuckDuckGo(query, limit);
+        results.push({ title, link });
+      }
 
-    console.log(`\nResultados para: "${dataResponse.query}" (engine: ${dataResponse.engine})\n`);
-    if (!dataResponse.results || dataResponse.results.length === 0) {
-      console.log("Nenhum resultado encontrado.");
-      return;
+      return new Response(JSON.stringify({ query: q, engine: "ddg", results }), {
+        status: 200,
+        headers: jsonHeaders(),
+      });
+
+    } catch (err) {
+      return new Response(JSON.stringify({ error: String(err.message || err) }), {
+        status: 500,
+        headers: jsonHeaders(),
+      });
     }
-
-    dataResponse.results.forEach((r, i) => {
-      console.log(`${i + 1}. ${r.title}\n   → ${r.link}\n`);
-    });
-  } catch (err) {
-    console.error("Erro:", err.message);
-    process.exitCode = 1;
   }
-})();
+};
+
+function jsonHeaders() {
+  return {
+    "Content-Type": "application/json;charset=utf-8",
+    "Access-Control-Allow-Origin": "*",             // permite chamadas do browser
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "x-api-key, Content-Type",
+  };
+}
